@@ -2,8 +2,7 @@
 
 data_cancer = readr::read_csv('./data.csv') |>
   dplyr::mutate(diagnosis = as.factor(diagnosis )) |>
-  dplyr::select(id, diagnosis , dplyr::contains('_mean')) |>
-  dplyr::select(-radius_mean, -perimeter_mean, -compactness_mean) 
+  dplyr::select(id, diagnosis , dplyr::contains('_mean')) 
   
 
 dplyr::glimpse(data_cancer)
@@ -57,14 +56,15 @@ hist_vars_cancer = apply(data_cancer_train[,3:12], 2,
       function(vars_){
           data_cancer_train |>
           ggplot2::ggplot(ggplot2::aes(x = vars_, color = diagnosis)) +
-          ggplot2::geom_histogram(ggplot2::aes(y = ..density..)) 
+          ggplot2::geom_histogram(ggplot2::aes(y = ggplot2::after_stat(density))) +
+          ggthemes::scale_colour_colorblind()
 
 })
 
 do.call(gridExtra::grid.arrange, hist_vars_cancer)
 
 fa_ml_cancer = data_cancer_train |>
-  dplyr::select(dplyr::contains('_mean')) |>
+                dplyr::select(dplyr::contains('_mean')) |>
   psych::fa(nfactors = 2, rotate = 'varimax', fm = 'ml') 
 
 fa_ml_cancer |> psych::fa.diagram()
@@ -101,7 +101,7 @@ fa_mr_scoreplot = fa_mr_cancer$scores |>
   dplyr::mutate(diagnosis = data_cancer_train$diagnosis) |>
   ggplot2::ggplot(ggplot2::aes(MR1, MR2, col = diagnosis)) +
   ggplot2::geom_point(size = 2) +
-  ggplot2::labs(title = 'Redução via Componentes Principais') +
+  ggplot2::labs(title = 'Redução via Residuos Minimos') +
   ggthemes::scale_colour_colorblind()
 
 
@@ -111,13 +111,8 @@ pr_cancer = data_cancer_train |>
   princomp()
 
 pr_cancer |> summary()
-fviz_pca_var(pr_cancer)
+factoextra::fviz_pca_var(pr_cancer)
 
-fa_cancer = data_cancer_train |>
-  dplyr::select(dplyr::contains('_mean')) |>
-  factanal(factors = 6, scores = "regression")
-
-plot(fa_cancer$scores[,1], fa_cancer$scores[,2], col = as.factor(data_cancer$diagnosis))
 
 data_cancer_train |>
   dplyr::select(-id, -diagnosis) |>
@@ -130,13 +125,14 @@ data_cancer_train |>
 ## Modelling
 cancer_recipe = recipes::recipe(diagnosis ~ .,
                                 data = data_cancer_train) |>
-                recipes::step_rm(id) |>
-                recipes::step_corr() |>
-                recipes::step_normalize(contains('_mean'))
+                recipes::step_rm(id) 
   
 cancer_recipe |>
   recipes::prep() |>
   recipes::bake(new_data = NULL)
+
+cancer_wf = workflows::workflow() |>
+  workflows::add_recipe(cancer_recipe)
 
 
 
@@ -144,29 +140,43 @@ logistic_spec = parsnip::logistic_reg() |>
   parsnip::set_engine("glm") |>
   parsnip::set_mode("classification")
 
-dt_spec = parsnip::decision_tree() |>
-  parsnip::set_engine('spark') |>
-  parsnip::set_mode("classification")
-  
 
 rf_spec = parsnip::rand_forest() |>
   parsnip::set_engine("randomForest") |>
   parsnip::set_mode("classification")
 
+knn_spec = parsnip::nearest_neighbor() |>
+  parsnip::set_engine("randomForest") |>
+  parsnip::set_mode("classification")
 
 
-cancer_wf = workflowsets::workflow_set(preproc = list(cancer_recipe),
-                                       models = list(logistic_spec, rf_spec))
+
+cancer_logistic = cancer_wf |>
+  workflows::add_model(logistic_spec) |>
+  tune::fit_resamples(
+    resamples = cv_folds,
+    control = tune::control_resamples(save_pred = T, verbose = T)
+  )
+
+cancer_rf = cancer_wf |>
+  workflows::add_model(rf_spec) |>
+  tune::fit_resamples(
+    resamples = cv_folds,
+    control = tune::control_resamples(save_pred = T, verbose = T)
+  )
 
 doParallel::registerDoParallel()
 
-cancer_fit = workflowsets::workflow_map(cancer_wf,
-                                        "fit_resamples",
-                                        resamples = cv_folds,
-                                        metrics = yardstick::metric_set(accuracy, roc_auc, rmse))
+
+
+cancer_rf |> workflowsets::collect_metrics()
+cancer_logistic |> workflowsets::collect_metrics()
+
+
 
 ggplot2::autoplot(cancer_fit,
                   metric = c('accuracy', 'roc_auc', 'mae'))
+
 
 
 
